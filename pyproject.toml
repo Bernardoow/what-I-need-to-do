@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "what-i-need-to-do"
+version = "0.1.0"
+description = "CLI de tarefas pessoais com destinos configuráveis"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+win-td = "todo_cli.cli:main"
+
+[tool.setuptools]
+packages = ["todo_cli"]
+
+[tool.ruff]
+line-length = 99
