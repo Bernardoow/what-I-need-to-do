@@ -67,6 +67,12 @@ def _parser(destination: Destination | None) -> argparse.ArgumentParser:
         command.add_argument(
             "task_id", nargs="?", metavar="ID", help="Omita para buscar por título."
         )
+        if name == "done":
+            command.add_argument(
+                "--all",
+                action="store_true",
+                help="Incluir tarefas concluídas na busca por título.",
+            )
         if name != "update":
             continue
         command.add_argument("--title", help="Novo título da tarefa.")
@@ -263,12 +269,14 @@ def _check_destination_unchanged(
     raise DomainError(f"O destino {name!r} mudou durante a operação. Tente novamente.")
 
 
-def _task_id(given: str | None, *, tasks: Tasks, terminal: Terminal) -> str | None:
+def _task_id(
+    given: str | None, *, tasks: Tasks, terminal: Terminal, include_completed: bool
+) -> str | None:
     if given is not None:
         return given
     if not terminal.interactive:
         raise DomainError("Informe o ID da tarefa ou use um terminal interativo.")
-    options = tasks.list(include_completed=True)
+    options = tasks.list(include_completed=include_completed)
     if not options:
         print("Nenhuma tarefa disponível.")
         return None
@@ -350,7 +358,12 @@ def _run_task_command(
         _print_row(tasks.add(args.title))
         return
 
-    task_id = _task_id(args.task_id, tasks=tasks, terminal=terminal)
+    task_id = _task_id(
+        args.task_id,
+        tasks=tasks,
+        terminal=terminal,
+        include_completed=args.all if args.command == "done" else True,
+    )
     if task_id is None:
         return
     if args.command == "show":

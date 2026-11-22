@@ -405,6 +405,31 @@ class TodoCliTests(unittest.TestCase):
         )
         self.assertIn(f"{second_match}\tTo do\tConferir orçamento", shown)
 
+    def test_done_search_includes_completed_tasks_only_with_all(self) -> None:
+        self.register_work()
+        pending_title = "Revisar agenda atual"
+        completed_title = "Revisar agenda antiga"
+        pending_id = self.add_task(title=pending_title)
+        completed_id = self.add_task(title=completed_title)
+        self.cli("done", completed_id)
+
+        shown = self.interactive_cli(
+            "done",
+            "--all",
+            steps=[("Esc cancela", b"ANTIGA"), ("Buscar: ANTIGA", b"\r")],
+        )
+        initial_screen = shown.partition("Buscar: A")[0]
+        self.assertIn(f"{pending_title} · To do", initial_screen)
+        self.assertIn(f"{completed_title} · Done", initial_screen)
+        self.assertIn(f"{completed_id}\tDone\t{completed_title}", shown)
+
+        shown = self.interactive_cli("done", steps=[(pending_title, b"\r")])
+        self.assertNotIn(completed_title, shown)
+        self.assertIn(f"{pending_id}\tDone\t{pending_title}", shown)
+
+        empty = self.interactive_cli("done", steps=[])
+        self.assertIn("Nenhuma tarefa disponível.", empty)
+
     def test_interactive_update_offers_actions_and_delete_can_be_canceled(self) -> None:
         self.include_tag_column()
         self.register_work()

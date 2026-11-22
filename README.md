@@ -27,6 +27,7 @@ win-td done
 ```
 
 - `show`, `update`, `done` e `delete` abrem uma busca por título quando você omite o ID em um terminal interativo POSIX. Com ID, atuam diretamente. `delete` envia a tarefa para a lixeira do Notion.
+- A busca de `win-td done` exibe as tarefas em aberto. Use `win-td done --all` para incluir concluídas e digite parte do título para filtrar as opções.
 - Use `win-td list --all` para incluir concluídas. Se a tarefa já tiver um horário de início ou conclusão, executar `update --start-now` ou `done` novamente preserva o valor anterior.
 - Use `win-td update --help` para ver as opções das colunas de seleção múltipla. Uma coluna `Tag` gera `--tag`. Ao acrescentar um valor novo à coluna, o CLI pede confirmação no terminal.
 - Use `win-td destination refresh` depois de alterar as colunas na base. Se precisar refazer o mapeamento de estado ou de horários, use `win-td destination add trabalho --replace`.
@@ -37,4 +38,14 @@ A configuração fica em `~/.config/win-td/config.json` por padrão. Ela respeit
 
 ## Testes
 
-Rode `python -m unittest discover -v`. Os testes usam uma API do Notion simulada localmente e um terminal de teste para as operações interativas.
+Use os comandos abaixo em um ambiente virtual ativo para instalar o Ruff na
+mesma versão do CI e rodar as verificações com o Make.
+
+```sh
+python -m pip install -r requirements-dev.txt
+make check
+```
+
+`make lint` e `make format-check` verificam o código com Ruff. `make test` roda
+`python -m unittest discover -v`. A suíte usa um terminal de teste e abre um
+socket em `127.0.0.1` para simular a API do Notion sem credenciais.
