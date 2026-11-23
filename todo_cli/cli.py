@@ -9,7 +9,7 @@ from uuid import UUID
 from .config import Config, ConfigStore
 from .core import Destination, DomainError, TagApprovalRequired, Task, Tasks
 from .destinations import configure, remap_source, validate
-from .editor import Edit, choose_edit, field_options, with_field_aliases
+from .editor import Edit, FieldOptions, choose_edit, field_options, with_field_aliases
 from .notion import NotionClient, NotionRepository
 from .terminal import Terminal, clean_text
 
@@ -22,7 +22,7 @@ def _source_option(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def _parser(destination: Destination | None) -> argparse.ArgumentParser:
+def _parser(selection_options: FieldOptions) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="win-td", description="Capture e organize tarefas pessoais.", allow_abbrev=False
     )
@@ -81,13 +81,13 @@ def _parser(destination: Destination | None) -> argparse.ArgumentParser:
             action="store_true",
             help="Registrar o horário atual na coluna de início cadastrada.",
         )
-        for index, (option, column) in enumerate(field_options(destination)):
+        for option, column in selection_options:
             column_name = clean_text(column.name).replace("%", "%%")
             command.add_argument(
                 option,
                 action="append",
                 metavar="VALOR",
-                dest=f"selection_{index}",
+                dest=option,
                 help=f"Acrescentar um valor na coluna {column_name!r}. Pode ser repetida.",
             )
     return parser
@@ -307,10 +307,10 @@ def _print_details(task: Task, destination: Destination) -> None:
             print(f"{clean_text(column.name)}: {', '.join(map(clean_text, values))}")
 
 
-def _read_edit(args: argparse.Namespace, destination: Destination) -> Edit:
+def _read_edit(args: argparse.Namespace, *, selection_options: FieldOptions) -> Edit:
     selections = {}
-    for index, (_, column) in enumerate(field_options(destination)):
-        if values := getattr(args, f"selection_{index}"):
+    for option, column in selection_options:
+        if values := getattr(args, option):
             selections[column] = tuple(values)
     return Edit(title=args.title, start_now=args.start_now, selections=selections)
 
@@ -343,6 +343,7 @@ def _run_task_command(
     destination: Destination,
     client: NotionClient,
     terminal: Terminal,
+    selection_options: FieldOptions,
 ) -> None:
     tasks = Tasks(
         store=NotionRepository(client, destination),
@@ -374,13 +375,13 @@ def _run_task_command(
         tasks.delete(task_id)
         print("Tarefa enviada para a lixeira.")
     else:
-        edit = _read_edit(args, destination)
+        edit = _read_edit(args, selection_options=selection_options)
         if edit == Edit():
             if not terminal.interactive:
                 raise DomainError(
                     "Informe pelo menos uma alteração. Consulte win-td update --help."
                 )
-            edit = choose_edit(terminal, destination)
+            edit = choose_edit(terminal, destination, selection_options=selection_options)
         if edit is None:
             return
         task = _apply_edit(tasks=tasks, task_id=task_id, edit=edit, terminal=terminal)
@@ -409,11 +410,11 @@ def main(
         early = _early_args(arguments)
         if early.command == "update" and arguments[0] not in ("-h", "--help"):
             config = store.load()
-            if config.active is not None or _source_override(early) is not None:
-                destination = _resolve_destination(
-                    config, override=_source_override(early), connect=connect
-                )
-        args = _parser(destination).parse_args(arguments)
+            override = _source_override(early)
+            if config.active is not None or override is not None:
+                destination = _resolve_destination(config, override=override, connect=connect)
+        selection_options = field_options(destination)
+        args = _parser(selection_options).parse_args(arguments)
         config = config if config is not None else store.load()
         if args.command in ("destination", "use"):
             _manage_destination(
@@ -424,7 +425,13 @@ def main(
                 destination = _resolve_destination(
                     config, override=_source_override(args), connect=connect
                 )
-            _run_task_command(args, destination=destination, client=connect(), terminal=terminal)
+            _run_task_command(
+                args,
+                destination=destination,
+                client=connect(),
+                terminal=terminal,
+                selection_options=selection_options,
+            )
         return 0
     except DomainError as error:
         print(f"Erro: {clean_text(str(error))}", file=sys.stderr)

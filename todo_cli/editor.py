@@ -8,6 +8,7 @@ from .terminal import Terminal
 
 
 _RESERVED_FIELD_OPTIONS = {"--help", "--data-source-id", "--start-now", "--title"}
+FieldOptions = tuple[tuple[str, Column], ...]
 
 
 @dataclass(frozen=True)
@@ -55,7 +56,7 @@ def _allocate_flags(
     return flags
 
 
-def field_options(destination: Destination | None) -> tuple[tuple[str, Column], ...]:
+def field_options(destination: Destination | None) -> FieldOptions:
     if destination is None:
         return ()
     columns = _selection_columns(destination=destination)
@@ -106,7 +107,9 @@ def with_field_aliases(
     )
 
 
-def choose_edit(terminal: Terminal, destination: Destination) -> Edit | None:
+def choose_edit(
+    terminal: Terminal, destination: Destination, *, selection_options: FieldOptions
+) -> Edit | None:
     actions: list[tuple[str, Callable[[], Edit]]] = [
         ("Editar título", lambda: Edit(title=terminal.prompt("Novo título")))
     ]
@@ -117,7 +120,7 @@ def choose_edit(terminal: Terminal, destination: Destination) -> Edit | None:
         value = terminal.prompt(f"Valor para {column.name}")
         return Edit(selections={column: (value,)})
 
-    for _, column in field_options(destination):
+    for _, column in selection_options:
         actions.append(
             (f"Adicionar valor em {column.name}", lambda column=column: choose_value(column))
         )

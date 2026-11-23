@@ -1,4 +1,5 @@
 import errno
+import json
 import os
 import select
 import subprocess
@@ -21,6 +22,7 @@ from tests.fake_notion import (
     TAG_ID,
     TITLE_ID,
     FakeNotion,
+    data_source,
     option,
 )
 
@@ -154,19 +156,41 @@ class TodoCliTests(unittest.TestCase):
         )
         self.cli("use", "work")
 
-    def add_task(self, *, title: str) -> str:
+    def register_second(self) -> None:
+        self.cli(
+            "destination",
+            "add",
+            "second",
+            "--data-source-id",
+            SECOND_SOURCE_ID,
+            "--status-column",
+            "Andamento",
+            "--pending-state",
+            "A fazer",
+            "--completed-state",
+            "Entregue",
+        )
+
+    def add_task(self, *extra_options: str, title: str) -> str:
         before = set(self.server.pages)
-        self.cli("add", title)
+        self.cli("add", title, *extra_options)
         new_ids = self.server.pages.keys() - before
         self.assertEqual(len(new_ids), 1)
         return new_ids.pop()
 
-    def include_tag_column(self, *, name: str = "Tag") -> None:
-        schemas = self.server.sources[SOURCE_ID]["properties"]
+    def include_tag_column(
+        self,
+        *,
+        name: str = "Tag",
+        source_id: str = SOURCE_ID,
+        column_id: str = TAG_ID,
+        choices: tuple[str, ...] = ("Revisão", "Financeiro"),
+    ) -> None:
+        schemas = self.server.sources[source_id]["properties"]
         schemas[name] = {
-            "id": TAG_ID,
+            "id": column_id,
             "type": "multi_select",
-            "multi_select": {"options": [option(name="Revisão"), option(name="Financeiro")]},
+            "multi_select": {"options": [option(name=choice) for choice in choices]},
         }
 
     def assert_property_changes(self, *, task_id: str, expected: set[str]) -> None:
@@ -175,6 +199,22 @@ class TodoCliTests(unittest.TestCase):
         keys = {properties.get(key, {}).get("id", key) for key in payload["properties"]}
         self.assertEqual(changed_id, task_id)
         self.assertEqual(keys, expected)
+
+    def assert_edit_option(self, *, help_text: str, flag: str, column_name: str) -> None:
+        self.assertIn(
+            f"{flag} VALOR Acrescentar um valor na coluna {column_name!r}.",
+            " ".join(help_text.split()),
+        )
+
+    def assert_selection_changes(self, *, task_id: str, expected: dict[str, list[str]]) -> None:
+        self.assert_property_changes(task_id=task_id, expected=set(expected))
+        properties = self.server.pages[task_id]["properties"].values()
+        selections = {
+            prop["id"]: [tag["name"] for tag in prop["multi_select"]]
+            for prop in properties
+            if prop["id"] in expected
+        }
+        self.assertEqual(selections, expected)
 
     def test_help_and_parser_errors_use_the_installed_command_name(self) -> None:
         self.assertIn("usage: win-td ", self.cli("--help"))
@@ -211,19 +251,7 @@ class TodoCliTests(unittest.TestCase):
 
     def test_switching_destinations_persists_across_temporary_overrides(self) -> None:
         self.register_work()
-        self.cli(
-            "destination",
-            "add",
-            "second",
-            "--data-source-id",
-            SECOND_SOURCE_ID,
-            "--status-column",
-            "Andamento",
-            "--pending-state",
-            "A fazer",
-            "--completed-state",
-            "Entregue",
-        )
+        self.register_second()
         first_task = self.add_task(title="Revisar o orçamento")
         self.cli("use", "second")
         second_task = self.add_task(title="Responder ao cliente")
@@ -247,6 +275,67 @@ class TodoCliTests(unittest.TestCase):
         self.assertFalse(self.server.pages[first_task]["in_trash"])
         self.cli("use", "work")
         self.assertIn(first_task, self.cli("list"))
+
+    def test_update_options_follow_registered_and_unregistered_source_overrides(self) -> None:
+        self.include_tag_column(column_id="old-active-tags")
+        self.register_work()
+        schemas = self.server.sources[SOURCE_ID]["properties"]
+        schemas["Área"] = schemas.pop("Tag")
+        self.include_tag_column()
+        self.cli("destination", "refresh")
+        active_task = self.add_task(title="Tarefa do destino ativo")
+
+        self.include_tag_column(source_id=SECOND_SOURCE_ID, column_id="retired-tags")
+        self.register_second()
+        schemas = self.server.sources[SECOND_SOURCE_ID]["properties"]
+        schemas["Categoria"] = schemas.pop("Tag")
+        self.include_tag_column(source_id=SECOND_SOURCE_ID, column_id="registered-tags")
+        self.cli("destination", "refresh", "second")
+
+        unregistered_source = "966a7c58-97b8-47bc-959a-50228c9236c8"
+        self.server.sources[unregistered_source] = data_source(
+            item_id=unregistered_source,
+            title="Descrição",
+            status="Status",
+            pending="To do",
+            completed="Done",
+        )
+        self.include_tag_column(source_id=unregistered_source, column_id="temporary-tags")
+
+        for source_id, column_id, flag in (
+            (SECOND_SOURCE_ID, "registered-tags", "--tag-2"),
+            (unregistered_source, "temporary-tags", "--tag"),
+        ):
+            with self.subTest(source_id=source_id):
+                title = f"Tarefa com {column_id}"
+                task_id = self.add_task("--data-source-id", source_id, title=title)
+                self.env["WIN_TD_DATA_SOURCE_ID"] = source_id
+                help_text = self.cli("update", "--help")
+                self.assert_edit_option(help_text=help_text, flag=flag, column_name="Tag")
+                if source_id == SECOND_SOURCE_ID:
+                    self.assert_edit_option(
+                        help_text=help_text, flag="--categoria", column_name="Categoria"
+                    )
+
+                self.interactive_cli(
+                    "update",
+                    steps=[
+                        (title, b"\r"),
+                        ("Adicionar valor em Tag", b"Tag\r"),
+                        ("Valor para Tag: ", "Revisão\r".encode()),
+                    ],
+                )
+                self.assert_selection_changes(task_id=task_id, expected={column_id: ["Revisão"]})
+
+                self.env["WIN_TD_DATA_SOURCE_ID"] = SOURCE_ID
+                self.cli("update", task_id, "--data-source-id", source_id, flag, "Financeiro")
+                self.assert_selection_changes(
+                    task_id=task_id, expected={column_id: ["Revisão", "Financeiro"]}
+                )
+
+        del self.env["WIN_TD_DATA_SOURCE_ID"]
+        self.cli("update", active_task, "--tag-2", "Revisão")
+        self.assert_selection_changes(task_id=active_task, expected={TAG_ID: ["Revisão"]})
 
     def test_interactive_destination_removal_clears_active_selection(self) -> None:
         self.register_work()
@@ -468,6 +557,22 @@ class TodoCliTests(unittest.TestCase):
         self.cli("update", task_id, "--area-de-atuacao", "Revisão")
         self.assert_property_changes(task_id=task_id, expected={TAG_ID})
 
+    def test_legacy_destination_without_options_uses_its_saved_columns(self) -> None:
+        self.include_tag_column(name="Área")
+        self.register_work()
+        path = Path(self.env["WIN_TD_CONFIG"])
+        config = json.loads(path.read_text(encoding="utf-8"))
+        del config["destinations"]["work"]["field_aliases"]
+        del config["destinations"]["work"]["retired_field_aliases"]
+        path.write_text(json.dumps(config), encoding="utf-8")
+        task_id = self.add_task(title="Revisar o cadastro antigo")
+
+        self.assert_edit_option(
+            help_text=self.cli("update", "--help"), flag="--area", column_name="Área"
+        )
+        self.cli("update", task_id, "--area", "Revisão")
+        self.assert_selection_changes(task_id=task_id, expected={TAG_ID: ["Revisão"]})
+
     def test_add_and_list_work_after_an_optional_column_is_removed(self) -> None:
         self.include_tag_column()
         self.register_work()
@@ -479,23 +584,51 @@ class TodoCliTests(unittest.TestCase):
         self.assertIn(task_id, listing)
         self.assertIn("Acompanhar a proposta", listing)
 
-    def test_refresh_preserves_an_option_when_a_new_column_has_the_same_slug(self) -> None:
-        self.include_tag_column(name="Tag-de-equipe")
+    def test_refreshed_help_menu_and_arguments_agree_for_colliding_options(self) -> None:
+        self.include_tag_column(name="Tag de equipe", choices=("Revisão", "Operações", "Jurídico"))
         self.register_work()
         schemas = self.server.sources[SOURCE_ID]["properties"]
-        schemas["Tag de equipe"] = {
-            "id": "new-tags",
-            "type": "multi_select",
-            "multi_select": {"options": [option(name="Revisão"), option(name="Financeiro")]},
-        }
+        schemas["Tag-de-equipe"] = schemas.pop("Tag de equipe")
+        self.include_tag_column(
+            name="Tag de equipe", column_id="new-tags", choices=("Financeiro",)
+        )
         self.cli("destination", "refresh")
         task_id = self.add_task(title="Preparar apresentação")
 
-        self.cli("update", task_id, "--tag-de-equipe", "Revisão")
-        self.cli("update", task_id, "--tag-de-equipe-2", "Financeiro")
+        help_text = self.cli("update", "--help")
+        self.assert_edit_option(
+            help_text=help_text, flag="--tag-de-equipe", column_name="Tag-de-equipe"
+        )
+        self.assert_edit_option(
+            help_text=help_text, flag="--tag-de-equipe-2", column_name="Tag de equipe"
+        )
+        menu = self.interactive_cli(
+            "update",
+            task_id,
+            steps=[
+                ("Adicionar valor em Tag de equipe", b"Tag-de-equipe\r"),
+                ("Valor para Tag-de-equipe: ", "Revisão\r".encode()),
+            ],
+        )
+        self.assertIn("Adicionar valor em Tag-de-equipe", menu)
+        self.assert_selection_changes(task_id=task_id, expected={TAG_ID: ["Revisão"]})
 
+        self.cli(
+            "update",
+            task_id,
+            "--tag-de-equipe-2",
+            "Financeiro",
+            "--tag-de-equipe",
+            "Operações",
+            "--tag-de-equipe",
+            "Jurídico",
+        )
+        self.assert_selection_changes(
+            task_id=task_id,
+            expected={TAG_ID: ["Revisão", "Operações", "Jurídico"], "new-tags": ["Financeiro"]},
+        )
         details = self.cli("show", task_id)
-        self.assertIn("Tag-de-equipe: Revisão", details)
+        self.assertIn("Tag-de-equipe: Revisão, Operações, Jurídico", details)
         self.assertIn("Tag de equipe: Financeiro", details)
 
     def test_refresh_only_restores_a_retired_option_to_the_original_column(self) -> None:
