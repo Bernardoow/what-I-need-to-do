@@ -52,6 +52,10 @@ def _parser(selection_options: FieldOptions) -> argparse.ArgumentParser:
     add = commands.add_parser("add", allow_abbrev=False, help="Criar uma tarefa pendente.")
     _source_option(add)
     add.add_argument("title", metavar="TÍTULO")
+    capture = commands.add_parser(
+        "+", allow_abbrev=False, help="Pedir o título da tarefa no terminal."
+    )
+    _source_option(capture)
     listing = commands.add_parser("list", allow_abbrev=False, help="Listar tarefas e seus IDs.")
     _source_option(listing)
     listing.add_argument("--all", action="store_true", help="Incluir tarefas concluídas.")
@@ -292,6 +296,24 @@ def _task_id(
     return options[index].id if index is not None else None
 
 
+def _capture_title(*, terminal: Terminal) -> str | None:
+    if not terminal.interactive:
+        raise DomainError("Use win-td add 'título da tarefa' fora de um terminal interativo.")
+    while True:
+        try:
+            title = terminal.prompt_line(label="Título")
+        except UnicodeDecodeError as error:
+            raise DomainError(
+                "O título contém texto inválido para a codificação do terminal."
+            ) from error
+        if title is None:
+            print(file=sys.stderr)
+            return None
+        if title.strip():
+            return title
+        print("Digite um título para continuar.", file=sys.stderr)
+
+
 def _print_row(task: Task) -> None:
     print(f"{task.id}\t{clean_text(task.state)}\t{clean_text(task.title)}")
 
@@ -415,6 +437,11 @@ def main(
                 destination = _resolve_destination(config, override=override, connect=connect)
         selection_options = field_options(destination)
         args = _parser(selection_options).parse_args(arguments)
+        if args.command == "+":
+            args.title = _capture_title(terminal=terminal)
+            if args.title is None:
+                return 0
+            args.command = "add"
         config = config if config is not None else store.load()
         if args.command in ("destination", "use"):
             _manage_destination(

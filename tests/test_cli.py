@@ -35,6 +35,13 @@ from unittest.mock import patch
 from todo_cli.cli import main
 from todo_cli.notion import NotionClient
 
+if sys.stdin.isatty():
+    import fcntl
+    import termios
+
+    # Ctrl+C only signals processes in the foreground of the controlling terminal.
+    fcntl.ioctl(sys.stdin.fileno(), termios.TIOCSCTTY, 0)
+
 url, user_directory, *arguments = sys.argv[1:]
 with patch('pathlib.Path.home', return_value=Path(user_directory)):
     raise SystemExit(main(arguments, client_factory=lambda token: NotionClient(token, base_url=url)))
@@ -100,6 +107,7 @@ class TodoCliTests(unittest.TestCase):
                         stdin=slave,
                         stdout=slave,
                         stderr=slave,
+                        start_new_session=True,
                     )
                 )
             finally:
@@ -113,7 +121,9 @@ class TodoCliTests(unittest.TestCase):
                     deadline = time.monotonic() + 5
                     while expected not in transcript[start:]:
                         chunk = self.read_terminal(master=master, deadline=deadline)
-                        self.assertTrue(chunk, f"Missing {marker!r} in {transcript.decode()!r}")
+                        self.assertTrue(
+                            chunk, f"Missing {marker!r} in {transcript.decode(errors='replace')!r}"
+                        )
                         transcript.extend(chunk)
                     keys = response() if callable(response) else response
                     os.write(master, keys)
@@ -121,7 +131,7 @@ class TodoCliTests(unittest.TestCase):
                 deadline = time.monotonic() + 5
                 while chunk := self.read_terminal(master=master, deadline=deadline):
                     transcript.extend(chunk)
-                output = transcript.decode()
+                output = transcript.decode(errors="replace")
                 self.assertEqual(process.wait(timeout=5), expected_returncode, output)
                 self.assertNotIn("Traceback", output)
                 return output
@@ -217,7 +227,9 @@ class TodoCliTests(unittest.TestCase):
         self.assertEqual(selections, expected)
 
     def test_help_and_parser_errors_use_the_installed_command_name(self) -> None:
-        self.assertIn("usage: win-td ", self.cli("--help"))
+        general_help = self.cli("--help")
+        self.assertIn("usage: win-td ", general_help)
+        self.assertIn("+ Pedir o título da tarefa no terminal.", " ".join(general_help.split()))
         self.assertIn("usage: win-td update ", self.cli("update", "--help"))
         self.assertIn("win-td: error:", self.cli("--data-source-id", expect_success=False))
 
@@ -237,17 +249,107 @@ class TodoCliTests(unittest.TestCase):
     def test_add_creates_a_pending_task_in_the_active_destination(self) -> None:
         self.register_work()
 
-        task_id = self.add_task(title="Revisar o orçamento")
+        for title in ("Revisar o orçamento", "+"):
+            with self.subTest(title=title):
+                task_id = self.add_task(title=title)
 
-        page = self.server.pages[task_id]
+                page = self.server.pages[task_id]
+                self.assertEqual(page["parent"]["data_source_id"], SOURCE_ID)
+                self.assertEqual(page["properties"]["Status"]["status"]["name"], "To do")
+                self.assertEqual(page["properties"]["Descrição"]["title"][0]["plain_text"], title)
+                self.assertIn(f"{task_id}\tTo do\t{title}\n", self.cli("list"))
+
+    def test_plus_creates_one_pending_task_with_a_free_text_title(self) -> None:
+        self.register_work()
+        title = 'Revisar orçamento "final" & conferir R$ 50'
+
+        output = self.interactive_cli("+", steps=[("Título: ", f"  {title}  \r".encode())])
+
+        self.assertEqual(len(self.server.pages), 1)
+        task_id, page = next(iter(self.server.pages.items()))
         self.assertEqual(page["parent"]["data_source_id"], SOURCE_ID)
         self.assertEqual(page["properties"]["Status"]["status"]["name"], "To do")
-        self.assertEqual(
-            page["properties"]["Descrição"]["title"][0]["plain_text"], "Revisar o orçamento"
+        self.assertEqual(page["properties"]["Descrição"]["title"][0]["plain_text"], title)
+        self.assertIn(f"{task_id}\tTo do\t{title}", output)
+
+    def test_plus_repeats_the_prompt_after_blank_titles(self) -> None:
+        self.register_work()
+        title = "Enviar a proposta"
+
+        output = self.interactive_cli(
+            "+",
+            steps=[
+                ("Título: ", b"\r"),
+                ("Título: ", b"   \r"),
+                ("Título: ", f"{title}\r".encode()),
+            ],
         )
-        listing = self.cli("list")
-        self.assertIn(task_id, listing)
-        self.assertIn("Revisar o orçamento", listing)
+
+        self.assertEqual(output.count("Digite um título para continuar."), 2)
+        self.assertEqual(output.count("Título: "), 3)
+        self.assertEqual(len(self.server.pages), 1)
+        self.assertTrue(self.cli("list").endswith(f"\tTo do\t{title}\n"))
+
+    def test_plus_cancels_on_end_of_input(self) -> None:
+        self.register_work()
+
+        for keys in (b"\x04", b"Rascunho\x04"):
+            with self.subTest(keys=keys):
+                output = self.interactive_cli("+", steps=[("Título: ", keys)])
+
+                self.assertEqual(output.count("Título: "), 1)
+                self.assertEqual(self.server.pages, {})
+
+    def test_plus_cancels_on_ctrl_c(self) -> None:
+        self.register_work()
+
+        output = self.interactive_cli("+", steps=[("Título: ", b"\x03")], expected_returncode=130)
+
+        self.assertIn("Operação cancelada.", output)
+        self.assertEqual(self.server.pages, {})
+
+    def test_plus_rejects_a_title_with_incomplete_multibyte_text(self) -> None:
+        self.register_work()
+        self.env["PYTHONIOENCODING"] = "utf-8"
+
+        output = self.interactive_cli(
+            "+", steps=[("Título: ", b"Rascunho \xc3\r")], expected_returncode=1
+        )
+
+        self.assertIn(
+            "Erro: O título contém texto inválido para a codificação do terminal.", output
+        )
+        self.assertEqual(self.server.pages, {})
+
+    def test_plus_requires_an_interactive_terminal(self) -> None:
+        error = self.cli("+", expect_success=False)
+
+        self.assertIn("terminal interativo", error)
+        self.assertIn("win-td add 'título da tarefa'", error)
+        self.assertNotIn("Título: ", error)
+        self.assertEqual(self.server.pages, {})
+
+    def test_plus_applies_source_overrides_for_one_execution(self) -> None:
+        self.register_work()
+        self.register_second()
+        active_title = "Revisar o orçamento"
+        active_task = self.add_task(title=active_title)
+
+        for options, env_source_id, title in (
+            ((), SECOND_SOURCE_ID, "Revisar pagamentos"),
+            (("--data-source-id", SECOND_SOURCE_ID), SOURCE_ID, "Agendar a reunião"),
+        ):
+            with self.subTest(options=options):
+                before = set(self.server.pages)
+                self.env["WIN_TD_DATA_SOURCE_ID"] = env_source_id
+                self.interactive_cli("+", *options, steps=[("Título: ", f"{title}\r".encode())])
+                del self.env["WIN_TD_DATA_SOURCE_ID"]
+
+                self.assertEqual(self.cli("list"), f"{active_task}\tTo do\t{active_title}\n")
+                new_ids = self.server.pages.keys() - before
+                self.assertEqual(len(new_ids), 1)
+                page = self.server.pages[new_ids.pop()]
+                self.assertEqual(page["parent"]["data_source_id"], SECOND_SOURCE_ID)
 
     def test_switching_destinations_persists_across_temporary_overrides(self) -> None:
         self.register_work()

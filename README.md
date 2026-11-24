@@ -18,6 +18,10 @@ A fonte precisa de uma coluna de título e uma do tipo Status. `win-td destinati
 
 ## Uso diário
 
+Em um terminal interativo POSIX, rode `win-td +`, digite o título em texto livre no prompt `Título:` e pressione Enter. Para cancelar a captura, pressione Ctrl+C ou Ctrl+D.
+
+Para passar o título no próprio comando, inclusive em scripts, use `win-td add`.
+
 ```sh
 win-td use trabalho
 win-td add "Pedir orçamento ao fornecedor"
