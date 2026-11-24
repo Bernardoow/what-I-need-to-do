@@ -1,4 +1,5 @@
 import codecs
+import io
 import os
 import select
 import sys
@@ -70,11 +71,27 @@ class Terminal:
     def prompt(self, label: str) -> str:
         if not self.interactive:
             return ""
-        print(f"{clean_text(label)}: ", file=sys.stderr, end="", flush=True)
+        _print_prompt(label=label)
         return sys.stdin.readline().rstrip("\r\n")
+
+    def prompt_line(self, *, label: str) -> str | None:
+        """Return text submitted with Enter, or None on end of input."""
+        if not self.interactive:
+            return None
+        _print_prompt(label=label)
+        # A canonical terminal read returns a record without a newline on Ctrl+D.
+        # The default stdin buffer can be smaller than a terminal record.
+        line = sys.stdin.buffer.read1(io.DEFAULT_BUFFER_SIZE)
+        if not line.endswith(b"\n"):
+            return None
+        return line[:-1].decode(sys.stdin.encoding or "utf-8")
 
     def confirm(self, label: str) -> bool:
         return self.prompt(f"{label} [s/N]").strip().casefold() in {"s", "sim", "y", "yes"}
+
+
+def _print_prompt(*, label: str) -> None:
+    print(f"{clean_text(label)}: ", file=sys.stderr, end="", flush=True)
 
 
 @contextmanager
